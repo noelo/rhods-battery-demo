@@ -10,19 +10,40 @@ from kfp.components import func_to_container_op
 from kubernetes.client import V1Volume, V1SecretVolumeSource, V1VolumeMount, V1EnvVar, V1PersistentVolumeClaimVolumeSource
 from typing import NamedTuple
 from os import environ as env
-import time
 
-def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterData:OutputPath(),runMode=0):
+
+
+def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
+    '''load data file passed from cloud event into relevant location'''
+    import boto3
+    import os
+
+    endpoint_url=os.environ["s3_host"]
+    aws_access_key_id=os.environ["s3_access_key"]
+    aws_secret_access_key=os.environ["s3_secret_access_key"]
+    print(endpoint_url,aws_access_key_id, aws_secret_access_key)
+
+    s3_target = boto3.resource('s3',
+        endpoint_url=endpoint_url,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=None,
+        config=boto3.session.Config(signature_version='s3v4'),
+        verify=False
+    )
+
+    with open(file_destination+data_file, 'wb') as f:
+        s3_target.meta.client.download_fileobj(bucket_details, data_file, f)
+
+
+def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_data:OutputPath(),experiment:str,run_mode=0):
+    """Preps the data for processing"""
     import shutil
     import numpy as np
     import pandas as pd
     import sys
     import logging
     import time
-    import sys
-    import argparse
-    # import random
-
     from importlib import reload
     import pickle
     from tensorflow import keras
@@ -33,38 +54,16 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
     from keras.layers import Dense, Dropout, Activation, TimeDistributed, Input, Concatenate
     from keras.optimizers import Adam
     from keras.layers import LSTM, Masking
-
-    RESULT_NAME = "2023-02-13-11-54-47_lstm_autoencoder_rul_unibo_powertools"
-    EXPERIMENT = "lstm_autoencoder_rul_unibo_powertools"
-
-    #data_path = "../../"
-    # data_path="/opt/data/pitstop/"
-
     
     sys.path.append(data_path)
     from data_processing.unibo_powertools_data import UniboPowertoolsData, CycleCols
     from data_processing.model_data_handler import ModelDataHandler
     from data_processing.prepare_rul_data import RulHandler
-
-
-    # ### Config logging
     reload(logging)
     logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
+    #help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
 
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("-r", "--runmode", type=int, choices=[0, 1, 2],
-    #                 help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
-    # args=parser.parse_args()
-
-    #copy process for the large or small file 
-    if runMode <2:
-        source=r"path_to_file/test_results_l.csv" 
-    else:
-        source=r"path_to_file/test_results_s.csv" 
-    target=r"path_to_file/test_results.csv"
-    shutil.copyfile(source, target)
-
-    if runMode == 0:
+    if run_mode == 0:
         train_names = [
     '000-DM-3.0-4019-S',#minimum capacity 1.48
     '001-DM-3.0-4019-S',#minimum capacity 1.81
@@ -97,7 +96,7 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
     '041-DM-4.00-2320-S',#minimum capacity 3.76, cycles 190
         ]
         epoch_count=270
-    elif runMode == 1:
+    elif run_mode == 1:
         train_names = [
     '002-DM-3.0-4019-S',#minimum capacity 2.06
     '009-DM-3.0-4019-H',#minimum capacity 1.41
@@ -142,10 +141,6 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
     )
 
     ################################################NOC
-
-
-
-
     dataset.prepare_data(train_names, test_names)
     dataset_handler = ModelDataHandler(dataset, [
         CycleCols.VOLTAGE,
@@ -157,7 +152,7 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
 
     # # Data preparation
 
-    CAPACITY_THRESHOLDS = {
+    capacity_tresholds = {
     3.0 : 2.7,#th 90% - min 2.1, 70%
     2.85 : 2.7,#th 94.7% - min 2.622, 92%
     2.0 : 1.93,#th 96.5% - min 1.93, 96.5%
@@ -170,13 +165,8 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
     train_battery_range, test_battery_range,
     time_train, time_test, current_train, current_test) = dataset_handler.get_discharge_whole_cycle_future(train_names, test_names, min_cycle_length=300)
 
-    train_y = rul_handler.prepare_y_future(train_names, train_battery_range, train_y_soh, current_train, time_train, CAPACITY_THRESHOLDS)
-    # del globals()["current_train"]
-    # del globals()["time_train"]
-    test_y = rul_handler.prepare_y_future(test_names, test_battery_range, test_y_soh, current_test, time_test, CAPACITY_THRESHOLDS)
-    # del globals()["current_test"]
-    # del globals()["time_test"]
-
+    train_y = rul_handler.prepare_y_future(train_names, train_battery_range, train_y_soh, current_train, time_train, capacity_tresholds)
+    test_y = rul_handler.prepare_y_future(test_names, test_battery_range, test_y_soh, current_test, time_test, capacity_tresholds)
     x_norm = rul_handler.Normalization()
     x_norm.fit(train_x)
 
@@ -259,9 +249,9 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
     y_norm.fit(train_y)
     train_y = y_norm.normalize(train_y)
     test_y = y_norm.normalize(test_y)  
-    # only trunmode 1 and 2 is training
-    if runMode <2:
-        experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + EXPERIMENT
+    # only trun_mode 1 and  is training
+    if run_mode <2:
+        experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
         print(experiment_name)
 
         opt = keras.optimizers.Adam(lr=0.000003)
@@ -295,18 +285,19 @@ def readyData(data_path:str,epoch_count:int, modelData:OutputPath(),parameterDat
         history = history.history
     
         #package up model and store
-        shutil.make_archive('/tmp/%store' % experiment_name, "tar", "/tmp/results/")       
-        shutil.copy('/tmp/%store' % experiment_name+".tar",modelData)
+        shutil.make_archive('/tmp/%store' % experiment_name, "tar", "/tmp/results/")
+        shutil.copy('/tmp/%store' % experiment_name+".tar",model_data)
         print("Model data stored")
     
-    dataStore = [train_x, train_y, train_battery_range, train_y_soh, test_x, test_y, test_battery_range, test_y_soh, y_norm, experiment_name,]  
+    data_store = [train_x, train_y, train_battery_range, train_y_soh, test_x, test_y, test_battery_range, test_y_soh, y_norm, experiment_name,]
     
-    with open(parameterData, "b+w") as f:   
-        pickle.dump(dataStore,f)    
+    with open(parameter_data, "b+w") as f:
+        pickle.dump(data_store,f)
     print('Parameter data written...')
     
     
-def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:OutputPath(),runMode=0,vin="123456"):
+def evaluate_model(data_path:str,model_data:InputPath(),paramater_data:InputPath(),output_images:OutputPath(),result_name:str,run_mode=0,vin="123456"):
+    """Evaluate the model"""
     import os  
     import shutil
     import pickle
@@ -319,17 +310,6 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
     from paho.mqtt import client as mqtt_client
     import json
     import random
-    broker = 'mqtt-broker-acc1-0-svc-rte-battery-monitoring.apps.cluster.a-proof-of-concept.com'
-    port = 443
-    topic = "batterytest/batterymonitoring"
-    # generate client ID with pub prefix randomly
-    sendclient_id= f'batterymonitoring-{random.randint(0, 100)}'
-    username = 'admin'
-    password = 'admin_access.redhat.com'
-    certificate="C:/Users/wscha_000/public.crt"
-    # VIN="123456"
-    
-    
     import tensorflow as tf
     from tensorflow import keras
     from keras import layers, regularizers
@@ -338,6 +318,18 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
     from keras.layers import Dense, Dropout, Activation, TimeDistributed, Input, Concatenate
     from keras.optimizers import Adam
     from keras.layers import LSTM, Masking
+    
+    
+    broker = 'mqtt-broker-acc1-0-svc-rte-battery-monitoring.apps.cluster.a-proof-of-concept.com'
+    port = 443
+    topic = "batterytest/batterymonitoring"
+    # generate client ID with pub prefix randomly
+    # send
+    client_id= f'batterymonitoring-{random.randint(0, 100)}'
+    username = 'admin'
+    password = 'admin_access.redhat.com'
+    certificate="C:/Users/wscha_000/public.crt"
+    # VIN="123456"
     
     def connect_mqtt(client_id) -> mqtt_client:
         def on_connect(client, userdata, flags, rc):
@@ -355,7 +347,7 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
         return client
 
     
-    f = open(paramaterData,"b+r")
+    f = open(paramater_data,"b+r")
     dataStore = pickle.load(f)
     train_x=dataStore[0]
     train_y=dataStore[1]
@@ -369,14 +361,14 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
     experiment_name=dataStore[9]
     
 
-    shutil.unpack_archive(modelData,"/tmp/model/","tar")
+    shutil.unpack_archive(model_data,"/tmp/model/","tar")
     res = []
     for (dir_path, dir_names, file_names) in os.walk("/tmp/model/"):
         res.extend(dir_path)
         res.extend(dir_names)
         res.extend(file_names)
     print(res)
-    history = pd.read_csv('/tmp/model/trained_model/%s_history.csv' % experiment_name)
+    # history = pd.read_csv('/tmp/model/trained_model/%s_history.csv' % experiment_name)
     model = keras.models.load_model('/tmp/model/trained_model/%s.h5' % experiment_name)
     model.summary(expand_nested=True)
     
@@ -384,15 +376,15 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
         os.mkdir("/tmp/result-images")
     
     # parser = argparse.ArgumentParser()
-    # parser.add_argument("-r", "--runmode", type=int, choices=[0, 1, 2],
+    # parser.add_argument("-r", "--run_mode", type=int, choices=[0, 1, 2],
     #                 help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
     # parser.add_argument("-v", "--vin")
     # args=parser.parse_args()
     # VIN=args.vin()
 
-    if runMode==2:
-        history = pd.read_csv(data_path + 'results/trained_model/%s_history.csv' % RESULT_NAME)
-        model = keras.models.load_model(data_path + 'results/trained_model/%s.h5' % RESULT_NAME)
+    if run_mode==2:
+        history = pd.read_csv(data_path + 'results/trained_model/%s_history.csv' % result_name)
+        model = keras.models.load_model(data_path + 'results/trained_model/%s.h5' % result_name)
         model.summary(expand_nested=True)
 
         client = connect_mqtt(client_id)
@@ -416,34 +408,7 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
                 print(f"Failed to send message to topic {topic}")
             time.sleep(5)
     
-    
-
     else:
-    # ### Testing
-   # results = model.evaluate(test_x, test_y, return_dict = True)
-   # print(results)
-   # max_rmse = 0
-   # for index in range(test_x.shape[0]):
-   #     result = model.evaluate(np.array([test_x[index, :, :]]), np.array([test_y[index]]), return_dict = True, verbose=0)
-   #     max_rmse = max(max_rmse, result['rmse'])
-   # print("Max rmse: {}".format(max_rmse))
-
-
-    # # Results Visualization
-    #fig = go.Figure()
-    #fig.add_trace(go.Scatter(y=history['loss'],
-    #                    mode='lines', name='train'))
-    #if 'val_loss' in history:
-    #    fig.add_trace(go.Scatter(y=history['val_loss'],
-    #                    mode='lines', name='validation'))
-    #fig.update_layout(title='Loss trend',
-    #                xaxis_title='epoch',
-    #                yaxis_title='loss',
-    #                width=1400,
-    #                height=600)
-    #fig.show()
-    #fig.write_image("/tmp/result-images/fig1.jpeg")
-
         a = 0
         for b in train_battery_range:
             fig = go.Figure()
@@ -460,101 +425,40 @@ def evaluateModel(modelData:InputPath(),paramaterData:InputPath(),outputImages:O
             fig.show()
             fig.write_image("/tmp/result-images/fig2.jpeg")
             a = b
-
-
-    #a = 0
-    #for b in train_battery_range:
-    #    fig = go.Figure()
-    #    fig.add_trace(go.Scatter(y=train_predictions[a:b,0],
-    #                        mode='lines', name='predicted'))
-    #    fig.add_trace(go.Scatter(y=train_y[a:b],
-    #                        mode='lines', name='actual'))
-    #    fig.update_layout(title='Results on training',
-    #                    xaxis_title='Cycle',
-    #                    yaxis_title='Remaining Ah until EOL',
-    #                    width=1400,
-    #                    height=600)
-    #    # fig.show()
-    #    fig.write_image("/tmp/result-images/fig3.jpeg")
-    #    
-    #    a = b
-
-
-    #test_predictions = model.predict(test_x)
-
-    #test_y = y_norm.denormalize(test_y)
-    #test_predictions = y_norm.denormalize(test_predictions)
-
-
-    #a = 0
-   # for b in test_battery_range:
-    #    fig = go.Figure()
-    #    fig.add_trace(go.Scatter(x=test_y_soh[a:b], y=test_predictions[a:b,0],
-    #                        mode='lines', name='predicted'))
-    #    fig.add_trace(go.Scatter(x = test_y_soh[a:b], y=test_y[a:b],
-    #                        mode='lines', name='actual'))
-    #    fig.update_layout(title='Results on testing',
-    #                    xaxis_title='SoH Capacity',
-    #                    yaxis_title='Remaining Ah until EOL',
-    #                    xaxis={'autorange':'reversed'},
-    #                    width=1400,
-    #                    height=600)
-    #    fig.write_image("/tmp/result-images/fig4.jpeg")
-    #    a = b
-
-
-    #a = 0
-    #for b in test_battery_range:
-    #    fig = go.Figure()
-    #    fig.add_trace(go.Scatter(y=test_predictions[a:b, 0],
-    #                        mode='lines', name='predicted'))
-    #    fig.add_trace(go.Scatter(y=test_y[a:b],
-    #                        mode='lines', name='actual'))
-    #    fig.update_layout(title='Results on testing',
-    #                    xaxis_title='Cycle',
-    #                    yaxis_title='Remaining Ah until EOL',
-    #                    width=1400,
-    #                    height=600)
-    #    fig.write_image("/tmp/result-images/fig4.jpeg")
-    #    a = b
-    
-    #shutil.make_archive('/tmp/%s_images' % experiment_name, "tar", "/tmp/result-images/")       
-    #shutil.copy('/tmp/%s_images' % experiment_name+".tar",outputImages)
-    #print("Image data stored")
-    
-def readFiles(modeldata: InputPath()):
+   
+def read_files(model_data: InputPath()):
     import os  
     import shutil
-    
-    shutil.unpack_archive(modeldata,"/tmp/model/","tar")
+    shutil.unpack_archive(model_data,"/tmp/model/","tar")
     res = []
     for (dir_path, dir_names, file_names) in os.walk("/tmp/model"):
-        res.extend(file_names)
+        res.extend(dir_path, dir_names, file_names)
     print(res)
-   
     
-readyData_op= components.create_component_from_func(
-    readyData, base_image='quay.io/noeloc/batterybase')
+prep_data_op= components.create_component_from_func(
+    prep_data, base_image='quay.io/noeloc/batterybase')
 
-evaluateModel_op= components.create_component_from_func(
-    evaluateModel, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido'])
-  
-readFiles_op= components.create_component_from_func(
-    readFiles, base_image='quay.io/noeloc/batterybase')    
+evaluate_model_op= components.create_component_from_func(
+    evaluate_model, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho'])
+
+read_files_op= components.create_component_from_func(
+    read_files, base_image='quay.io/noeloc/batterybase')
     
 @dsl.pipeline(
   name='batteryTestPipeline',
   description='Download files from minio and store'
 )
-def batteryTestPipeline():  
+def battery_test_pipeline():  
     vol = V1Volume(
         name='batterydatavol',
         persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
             claim_name='batterydata',)
         )
-    res = readyData_op(data_path="/opt/data/pitstop/",epoch_count=2).add_pvolumes({"/opt/data": vol})
-    images = evaluateModel_op(res.outputs["modelData"],res.outputs["parameterData"]).add_pod_annotation(name="tekton.dev/output_artifacts", value=("output.outputImages"))
-    # readFiles_op(images.output)
+    RESULT_NAME = "2023-02-13-11-54-47_lstm_autoencoder_rul_unibo_powertools"
+    EXPERIMENT = "lstm_autoencoder_rul_unibo_powertools"
+    res = prep_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment=EXPERIMENT).add_pvolumes({"/opt/data": vol})
+    images = evaluate_model_op(data_path="/opt/data/pitstop/",model_data=res.outputs["model_data"],paramater_data=res.outputs["parameter_data"],result_name=RESULT_NAME).add_pvolumes({"/opt/data": vol})
+    read_files_op(images.output)
 
 if __name__ == '__main__':
     from kfp_tekton.compiler import TektonCompiler
@@ -566,4 +470,4 @@ if __name__ == '__main__':
     pipeline_conf = pipeline_utils.TektonPipelineConf()
     pipeline_conf.add_pipeline_annotation("tekton.dev/track_artifact", 'true')
     compiler.produce_taskspec = False
-    compiler.compile(batteryTestPipeline, __file__.replace('.py', '.yaml'),tekton_pipeline_conf=pipeline_conf)  
+    compiler.compile(battery_test_pipeline, __file__.replace('.py', '.yaml'),tekton_pipeline_conf=pipeline_conf)  
