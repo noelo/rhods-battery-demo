@@ -293,7 +293,7 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
         pickle.dump(data_store,f)
     print('Parameter data written...')  
 
-def evaluate_model(data_path:str,model_data:InputPath(),paramater_data:InputPath(),output_images:OutputPath(),result_name:str,run_mode:int=0,vin="123456"):
+def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:OutputPath(),result_name:str,run_mode:int=0,vin="123456"):
     """Evaluate the model"""
     import os  
     import shutil
@@ -405,15 +405,13 @@ def evaluate_model(data_path:str,model_data:InputPath(),paramater_data:InputPath
                             xaxis={'autorange':'reversed'},
                             width=1400,
                         height=600)
-            fig.show()
-            fig.write_image(output_images)
+            # fig.show()
+            fig.write_image(output_images,format='png')
 
    
 def read_files(model_data: InputPath()):
     '''display stats of data files'''
     import os  
-    import shutil
-    shutil.unpack_archive(model_data,"/tmp/model/","tar")
     res = []
     for (dir_path, dir_names, file_names) in os.walk("/tmp/model"):
         res.extend(dir_path, dir_names, file_names)
@@ -458,7 +456,7 @@ def batterytest_pipeline(file_obj:str, src_bucket:str):
     res.add_pvolumes({"/opt/data/pitstop": vol})
     
 
-    inference_result = evaluate_model_op(data_path="/opt/data/pitstop/",model_data=res.outputs["model_data"],paramater_data=res.outputs["parameter_data"],result_name=result_name,run_mode=0)
+    inference_result = evaluate_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],result_name=result_name,run_mode=0)
     inference_result.add_pvolumes({"/opt/data/pitstop": vol})
     inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc-rte-battery-monitoring.apps.cluster.a-proof-of-concept.com'))
     inference_result.add_env_variable(V1EnvVar(name='mqtt_port', value='443'))
