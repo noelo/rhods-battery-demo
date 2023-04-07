@@ -3,6 +3,7 @@
 
 # # RUL estimation UNIBO Powertools Dataset
 import os
+import time
 from kfp import dsl, components
 from kfp.components import InputPath, OutputPath
 from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeSource
@@ -10,18 +11,20 @@ from kfp_tekton.compiler import TektonCompiler
 from kfp_tekton.compiler import pipeline_utils
 from kfp_tekton.k8s_client_helper import env_from_secret
 
-
-    #help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
-
+#help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
 def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     '''load data file passed from cloud event into relevant location'''
     import boto3
     import os
+    import logging
+
+    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
 
     endpoint_url=os.environ["s3_host"]
     aws_access_key_id=os.environ["s3_access_key"]
     aws_secret_access_key=os.environ["s3_secret_access_key"]
-    print(endpoint_url,aws_access_key_id, aws_secret_access_key)
+    logging.info("S3 creds %s %s %s ",endpoint_url,aws_access_key_id, aws_secret_access_key)
+    logging.info("Trigger data bucket %s file %s ",bucket_details,data_file)
 
     s3_target = boto3.resource('s3',
         endpoint_url=endpoint_url,
@@ -34,15 +37,13 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     with open(file_destination+data_file, 'wb') as f:
         s3_target.meta.client.download_fileobj(bucket_details, data_file, f)
 
-def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_data:OutputPath(),experiment:str,run_mode:int=0):
+def prep_data(data_path:str,epoch_count:int,parameter_data:OutputPath(),experiment_name:str,run_mode:int=0):
     """Preps the data for processing"""
-    import shutil
     import numpy as np
     import pandas as pd
     import sys
-    import logging
-    import time
     import pickle
+    import logging
     from importlib import reload
     from tensorflow import keras
     from keras import layers, regularizers
@@ -55,7 +56,6 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
     from data_processing.unibo_powertools_data import UniboPowertoolsData, CycleCols
     from data_processing.model_data_handler import ModelDataHandler
     from data_processing.prepare_rul_data import RulHandler
-    from enum import Enum
     
     sys.path.append(data_path)
     reload(logging)
@@ -64,6 +64,7 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
 
     # Normal Training
     if run_mode == 0:
+        logging.info("Normal Training")
         train_names = [
         '000-DM-3.0-4019-S',#minimum capacity 1.48
         '001-DM-3.0-4019-S',#minimum capacity 1.81
@@ -98,6 +99,7 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
         # epoch_count=270
     
     elif run_mode == 1: # POOR TRAINING
+        logging.info("Poor Training")
         train_names = [
         '002-DM-3.0-4019-S',#minimum capacity 2.06
         '009-DM-3.0-4019-H',#minimum capacity 1.41
@@ -124,6 +126,7 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
         ]
         # epoch_count=40
     else: #INFERENCING
+        logging.info("Inferencing")
         train_names = [
         '000-DM-3.0-4019-S'#minimum capacity 1.81
         ]
@@ -222,12 +225,12 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
     # compression
     train_x = autoencoder.encoder(train_x).numpy()
     test_x = autoencoder.encoder(test_x).numpy()
-    print("compressed train x shape {}".format(train_x.shape))
-    print("compressed test x shape {}".format(test_x.shape))
+    logging.info("compressed train x shape {}".format(train_x.shape))
+    logging.info("compressed test x shape {}".format(test_x.shape))
     test_x = test_x[:,~np.all(train_x == 0, axis=0)]#we need same column number of training
     train_x = train_x[:,~np.all(train_x == 0, axis=0)]
-    print("compressed train x shape without zero column {}".format(train_x.shape))
-    print("compressed test x shape without zero column {}".format(test_x.shape))
+    logging.info("compressed train x shape without zero column {}".format(train_x.shape))
+    logging.info("compressed test x shape without zero column {}".format(test_x.shape))
 
     x_norm = rul_handler.Normalization()
     x_norm.fit(train_x)
@@ -250,9 +253,6 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
 
     ## Only when training
     if run_mode != 2:
-        experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
-        print(experiment_name)
-
         opt = keras.optimizers.Adam(lr=0.000003)
         model = Sequential()
         model.add(Masking(input_shape=(train_x.shape[1], train_x.shape[2])))
@@ -274,29 +274,27 @@ def prep_data(data_path:str,epoch_count:int, model_data:OutputPath(),parameter_d
                                 verbose=2,
                                 validation_split=0.1
                             )
+        model_path= data_path+'data/results/trained_model/%s.h5' % experiment_name
 
-        model.save(data_path+'data/results/trained_model/%s.h5' % experiment_name)
+        model.save(model_path)
 
         hist_df = pd.DataFrame(history.history)
         hist_csv_file = data_path+'data/results/trained_model/%s_history.csv' % experiment_name
         with open(hist_csv_file, mode='w') as f:
             hist_df.to_csv(f)
+            
+        logging.info("Model saved to %s",model_path)
 
-        # #package up model and store
-        # shutil.make_archive('/tmp/%store' % experiment_name, "tar", "/tmp/results/")
-        # shutil.copy('/tmp/%store' % experiment_name+".tar",model_data)
-        # print("Model data stored")
-
-    data_store = [train_x, train_y, train_battery_range, train_y_soh, y_norm, experiment_name,test_x, test_y]
+    data_store = [train_x, train_y, train_battery_range, train_y_soh, y_norm, test_x, test_y]
 
     with open(parameter_data, "b+w") as f:
         pickle.dump(data_store,f)
-    print('Parameter data written...')  
 
-def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:OutputPath(),result_name:str,run_mode:int=0,vin="123456"):
+def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:OutputPath(),model_name:str,run_mode:int=0,vin="123456"):
     """Evaluate the model"""
     import os  
-    import shutil
+    import logging
+    from importlib import reload
     import pickle
     import time
     import numpy as np
@@ -314,45 +312,46 @@ def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:Output
     from keras.optimizers import Adam
     from keras.layers import LSTM, Masking
 
-    broker=os.environ["mqtt_broker"]
-    port=os.environ["mqtt_port"]
-    topic=os.environ["mqtt_topic"]
+    reload(logging)
+    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
+
+    broker=os.getenv("mqtt_broker","not set")
+    port=os.getenv("mqtt_port","-1")
+    topic=os.getenv("mqtt_topic","not set")
+    logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
 
     client_id= f'batterymonitoring-{random.randint(0, 100)}'
     username = 'admin'
     password = 'admin_access.redhat.com'
-    certificate="C:/Users/wscha_000/public.crt"
-    # VIN="123456"
     
     def connect_mqtt(client_id) -> mqtt_client:
         def on_connect(client, userdata, flags, rc):
             if rc == 0:
-                print("Connected to MQTT Broker!")
+                logging.info("Connected to MQTT Broker!")
             else:
-                print("Failed to connect, return code %d\n", rc)
+                logging.error("Failed to connect, return code %s", rc)
 
         client = mqtt_client.Client(client_id)
         client.username_pw_set(username, password)
-        client.tls_set(ca_certs=certificate)
-        client.tls_insecure_set(True)
         client.on_connect = on_connect
-        client.connect(broker, port)
+        client.connect(broker, int(port))
         return client
     
-    def send_mqtt_msg(client:mqtt_client,results):
-        for i in range(0,len(results)):
-            payload={
-                "VIN": vin,
-                "Battery Lifetime AH": y[i], 
-                "Timestamp": time.time()
-            }
-            result=client.publish(topic,str(payload))
-            status = result[0]
-            if status == 0:
-                jsonmsg = json.dumps(payload)
-                print(f"Send `{jsonmsg}` to topic `{topic}`")
-            else:
-                print(f"Failed to send message to topic {topic}")
+    # def send_mqtt_msg(client:mqtt_client,results):
+    #     print("res=>",results)
+    #     for i in range(0,len(results)):
+    #         payload={
+    #             "VIN": vin,
+    #             "Battery Lifetime AH": y[i], 
+    #             "Timestamp": time.time()
+    #         }
+    #         result=client.publish(topic,str(payload))
+    #         status = result[0]
+    #         if status == 0:
+    #             jsonmsg = json.dumps(payload)
+    #             print(f"Send `{jsonmsg}` to topic `{topic}`")
+    #         else:
+    #             print(f"Failed to send message to topic {topic}")
 
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
@@ -361,33 +360,46 @@ def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:Output
     train_battery_range=data_store[2]
     train_y_soh=data_store[3]
     y_norm=data_store[4]
-    experiment_name=data_store[5]
-    test_x=data_store[6]
-    test_y=data_store[7]
+    test_x=data_store[5]
+    test_y=data_store[6]
+    
+    history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % model_name)
+    model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % model_name)
+    model.summary(expand_nested=True)
 
     ## Inferencing
     if run_mode==2:
-        history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % result_name)
-        model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % result_name)
-        model.summary(expand_nested=True)
+        logging.info("Inferencing mode")
+
         client = connect_mqtt(client_id)
         train_predictions = model.predict(train_x)
         train_y = y_norm.denormalize(train_y)
         train_predictions = y_norm.denormalize(train_predictions)
-        # y=train_predictions[0,0]
-        send_mqtt_msg(client,train_predictions[0,0])   
+        y=train_predictions[0,0]
+        print("y",y)
+        # for i in range(0,len(y)):
+        payload={
+            "VIN": vin,
+            "Battery Lifetime AH": str(y), 
+            "Timestamp": str(time.time())
+        }
+        result=client.publish(topic,str(payload))
+        status = result[0]
+        if status == 0:
+            jsonmsg = json.dumps(payload)
+            logging.info(f"Send `{jsonmsg}` to topic `{topic}`")
+        else:
+            logging.info(f"Failed to send message to topic {topic}")  
     else:
-        history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name)
-        model = keras.models.load_model(data_path + 'data/results/trained_model/%s.h5' % experiment_name)
-        model.summary(expand_nested=True)
+        logging.info("Training mode")
         results = model.evaluate(test_x, test_y, return_dict = True)
-        print(results)
+        logging.info(results)
         max_rmse = 0
         for index in range(test_x.shape[0]):
             result = model.evaluate(np.array([test_x[index, :, :]]), np.array([test_y[index]]), return_dict = True, verbose=0)
             max_rmse = max(max_rmse, result['rmse'])
             
-        print("Max rmse: {}".format(max_rmse))
+        logging.info("Max rmse: {}".format(max_rmse))
 
         train_predictions = model.predict(train_x)
         train_y = y_norm.denormalize(train_y)
@@ -421,14 +433,21 @@ load_trigger_data_op= components.create_component_from_func(
     load_trigger_data, base_image='quay.io/noeloc/batterybase',
     packages_to_install=['boto3'])
 
-prep_data_op= components.create_component_from_func(
+prep_train_data_op= components.create_component_from_func(
     prep_data, base_image='quay.io/noeloc/batterybase')
 
-evaluate_model_op= components.create_component_from_func(
+train_model_op= components.create_component_from_func(
     evaluate_model, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
 
 read_files_op= components.create_component_from_func(
     read_files, base_image='quay.io/noeloc/batterybase')
+
+prep_inference_data_op= components.create_component_from_func(
+    prep_data, base_image='quay.io/noeloc/batterybase')
+
+inference_model_op= components.create_component_from_func(
+    evaluate_model, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
+
 
 @dsl.pipeline(
   name='batterytest-pipeline',
@@ -446,27 +465,35 @@ def batterytest_pipeline(file_obj:str, src_bucket:str):
     experiment = "lstm_autoencoder_rul_unibo_powertools"
     file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"
     
+    experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
+    
     trigger_data = load_trigger_data_op(file_obj, src_bucket,file_destination)
     trigger_data.add_pvolumes({"/opt/data/pitstop/": vol})
     trigger_data.add_env_variable(V1EnvVar(name='s3_host', value='http://rook-ceph-rgw-ceph-object-store.openshift-storage.svc:8080'))
     trigger_data.add_env_variable(env_from_secret('s3_access_key', 's3-secret', 'AWS_ACCESS_KEY_ID'))
     trigger_data.add_env_variable(env_from_secret('s3_secret_access_key', 's3-secret', 'AWS_SECRET_ACCESS_KEY'))
 
-    res = prep_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment=experiment,run_mode=0).after(trigger_data)
-    res.add_pvolumes({"/opt/data/pitstop": vol})
-    
+    res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=0).after(trigger_data)
+    res.add_pvolumes({"/opt/data/pitstop": vol})    
 
-    inference_result = evaluate_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],result_name=result_name,run_mode=0)
+    evaluate_result = train_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],model_name=experiment_name,run_mode=0)
+    evaluate_result.add_pvolumes({"/opt/data/pitstop": vol})
+    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
+    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
+    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_topic', value='batterytest/batterymonitoring'))
+    
+    read_files_op(evaluate_result.output)
+    
+    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=2).after(evaluate_result)
+    inference_prep.add_pvolumes({"/opt/data/pitstop": vol})
+    
+    inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],model_name=experiment_name,run_mode=2)
     inference_result.add_pvolumes({"/opt/data/pitstop": vol})
-    inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc-rte-battery-monitoring.apps.cluster.a-proof-of-concept.com'))
-    inference_result.add_env_variable(V1EnvVar(name='mqtt_port', value='443'))
+    inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
+    inference_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
     inference_result.add_env_variable(V1EnvVar(name='mqtt_topic', value='batterytest/batterymonitoring'))
     
     read_files_op(inference_result.output)
-    
-    # username = 'admin'
-    # password = 'admin_access.redhat.com'
-    # certificate="C:/Users/wscha_000/public.crt"
 
 if __name__ == '__main__':
     os.environ.setdefault("DEFAULT_STORAGE_CLASS","managed-csi")
@@ -475,5 +502,6 @@ if __name__ == '__main__':
     compiler = TektonCompiler()
     pipeline_conf = pipeline_utils.TektonPipelineConf()
     pipeline_conf.add_pipeline_annotation("tekton.dev/track_artifact", 'true')
+    pipeline_conf.set_ttl_seconds_after_finished(30)
     compiler.produce_taskspec = False
     compiler.compile(batterytest_pipeline, __file__.replace('.py', '.yaml'),tekton_pipeline_conf=pipeline_conf)  
