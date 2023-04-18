@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-
 # # RUL estimation UNIBO Powertools Dataset
 import os
 import time
@@ -10,6 +9,7 @@ from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeS
 from kfp_tekton.compiler import TektonCompiler
 from kfp_tekton.compiler import pipeline_utils
 from kfp_tekton.k8s_client_helper import env_from_secret
+from typing import NamedTuple
 
 #help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
 def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
@@ -37,7 +37,7 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     with open(file_destination+data_file, 'wb') as f:
         s3_target.meta.client.download_fileobj(bucket_details, data_file, f)
 
-def prep_data(data_path:str,epoch_count:int,parameter_data:OutputPath(),experiment_name:str,run_mode:int=0):
+def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPath(),experiment_name:str,run_mode:int=0):
     """Preps the data for processing"""
     import numpy as np
     import pandas as pd
@@ -277,21 +277,20 @@ def prep_data(data_path:str,epoch_count:int,parameter_data:OutputPath(),experime
         model_path= data_path+'data/results/trained_model/%s.h5' % experiment_name
 
         model.save(model_path)
+        logging.info("Model saved to %s",model_path)
 
         hist_df = pd.DataFrame(history.history)
         hist_csv_file = data_path+'data/results/trained_model/%s_history.csv' % experiment_name
         with open(hist_csv_file, mode='w') as f:
-            hist_df.to_csv(f)
-            
-        logging.info("Model saved to %s",model_path)
+            hist_df.to_csv(f)          
 
     data_store = [train_x, train_y, train_battery_range, train_y_soh, y_norm, test_x, test_y]
 
     with open(parameter_data, "b+w") as f:
         pickle.dump(data_store,f)
 
-def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:OutputPath(),model_name:str,run_mode:int=0,vin="123456"):
-    """Evaluate the model"""
+def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name:str,model_bucket:str="battery-model-bucket"):
+    """Upload model and notify"""
     import os  
     import logging
     from importlib import reload
@@ -302,6 +301,7 @@ def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:Output
     import plotly.graph_objects as go
     import json
     import random
+    import boto3
     import tensorflow as tf
     from paho.mqtt import client as mqtt_client
     from tensorflow import keras
@@ -317,7 +317,7 @@ def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:Output
 
     broker=os.getenv("mqtt_broker","not set")
     port=os.getenv("mqtt_port","-1")
-    topic=os.getenv("mqtt_topic","not set")
+    topic="batterytest/batterymonitoring"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
 
     client_id= f'batterymonitoring-{random.randint(0, 100)}'
@@ -363,67 +363,169 @@ def evaluate_model(data_path:str,paramater_data:InputPath(),output_images:Output
     test_x=data_store[5]
     test_y=data_store[6]
     
-    history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % model_name)
-    model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % model_name)
+    history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name)
+    model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % experiment_name)
+    model.summary(expand_nested=True)
+    
+    logging.info("Training mode")
+    results = model.evaluate(test_x, test_y, return_dict = True)
+    logging.info(results)
+    max_rmse = 0
+    for index in range(test_x.shape[0]):
+        result = model.evaluate(np.array([test_x[index, :, :]]), np.array([test_y[index]]), return_dict = True, verbose=0)
+        max_rmse = max(max_rmse, result['rmse'])
+        
+    logging.info("Max rmse: {}".format(max_rmse))
+
+    train_predictions = model.predict(train_x)
+    train_y = y_norm.denormalize(train_y)
+    train_predictions = y_norm.denormalize(train_predictions)
+    a = 0
+    for b in train_battery_range:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=train_y_soh[a:b], y=train_predictions[a:b,0],
+                            mode='lines', name='predicted'))
+        fig.add_trace(go.Scatter(x=train_y_soh[a:b], y=train_y[a:b],
+                            mode='lines', name='actual'))
+        fig.update_layout(title='Results on training',
+                        xaxis_title='SoH Capacity',
+                        yaxis_title='Remaining Ah until EOL',
+                        xaxis={'autorange':'reversed'},
+                        width=1400,
+                    height=600)
+        # fig.show()
+        output_image = data_path+'data/results/trained_model/%s.png' % experiment_name
+        fig.write_image(output_image,format='png')
+        
+        output_image = data_path+'data/results/trained_model/%s.png' % experiment_name
+        
+    endpoint_url=os.environ["s3_host"]
+    aws_access_key_id=os.environ["s3_access_key"]
+    aws_secret_access_key=os.environ["s3_secret_access_key"]
+    logging.info("S3 creds %s %s %s ",endpoint_url,aws_access_key_id, aws_secret_access_key)
+    logging.info("Uploading model to %s file %s ",model_bucket,experiment_name)
+
+    s3_target = boto3.resource('s3',
+        endpoint_url=endpoint_url,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=None,
+        config=boto3.session.Config(signature_version='s3v4'),
+        verify=False
+    )
+    
+    with open(data_path +'data/results/trained_model/%s.h5' % experiment_name, 'rb') as f:
+        s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".h5")
+        
+    with open(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name, 'rb') as f:
+        s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".csv")
+                
+                
+def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str,vin:str="12345"):
+    """Evaluate the model"""
+    import os  
+    import logging
+    from importlib import reload
+    import pickle
+    import time
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    import json
+    import random
+    import tensorflow as tf
+    from paho.mqtt import client as mqtt_client
+    from tensorflow import keras
+    from keras import layers, regularizers
+    from keras import backend as K
+    from keras.models import Sequential, Model
+    from keras.layers import Dense, Dropout, Activation, TimeDistributed, Input, Concatenate
+    from keras.optimizers import Adam
+    from keras.layers import LSTM, Masking
+
+    reload(logging)
+    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
+
+    broker=os.getenv("mqtt_broker","not set")
+    port=os.getenv("mqtt_port","-1")
+    topic="batterytest/batterymonitoring"
+    logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
+
+    client_id= f'batterymonitoring-{random.randint(0, 100)}'
+    username = 'admin'
+    password = 'admin_access.redhat.com'
+    
+    def connect_mqtt(client_id) -> mqtt_client:
+        def on_connect(client, userdata, flags, rc):
+            if rc == 0:
+                logging.info("Connected to MQTT Broker!")
+            else:
+                logging.error("Failed to connect, return code %s", rc)
+
+        client = mqtt_client.Client(client_id)
+        client.username_pw_set(username, password)
+        client.on_connect = on_connect
+        client.connect(broker, int(port))
+        return client
+    
+    # def send_mqtt_msg(client:mqtt_client,results):
+    #     print("res=>",results)
+    #     for i in range(0,len(results)):
+    #         payload={
+    #             "VIN": vin,
+    #             "Battery Lifetime AH": y[i], 
+    #             "Timestamp": time.time()
+    #         }
+    #         result=client.publish(topic,str(payload))
+    #         status = result[0]
+    #         if status == 0:
+    #             jsonmsg = json.dumps(payload)
+    #             print(f"Send `{jsonmsg}` to topic `{topic}`")
+    #         else:
+    #             print(f"Failed to send message to topic {topic}")
+
+    f = open(paramater_data,"b+r")
+    data_store = pickle.load(f)
+    train_x=data_store[0]
+    train_y=data_store[1]
+    # train_battery_range=data_store[2]
+    # train_y_soh=data_store[3]
+    y_norm=data_store[4]
+    # test_x=data_store[5]
+    # test_y=data_store[6]
+    
+    history = pd.read_csv(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name)
+    model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % experiment_name)
     model.summary(expand_nested=True)
 
-    ## Inferencing
-    if run_mode==2:
-        logging.info("Inferencing mode")
+    logging.info("Inferencing mode")
 
-        client = connect_mqtt(client_id)
-        train_predictions = model.predict(train_x)
-        train_y = y_norm.denormalize(train_y)
-        train_predictions = y_norm.denormalize(train_predictions)
-        y=train_predictions[0,0]
-        print("y",y)
-        # for i in range(0,len(y)):
-        payload={
-            "VIN": vin,
-            "Battery Lifetime AH": str(y), 
-            "Timestamp": str(time.time())
-        }
-        result=client.publish(topic,str(payload))
-        status = result[0]
-        if status == 0:
-            jsonmsg = json.dumps(payload)
-            logging.info(f"Send `{jsonmsg}` to topic `{topic}`")
-        else:
-            logging.info(f"Failed to send message to topic {topic}")  
+    client = connect_mqtt(client_id)
+    train_predictions = model.predict(train_x)
+    train_y = y_norm.denormalize(train_y)
+    train_predictions = y_norm.denormalize(train_predictions)
+    y=train_predictions[0,0]
+    print("y",y)
+    # for i in range(0,len(y)):
+    payload={
+        "VIN": vin,
+        "Battery Lifetime AH": str(y), 
+        "Timestamp": str(time.time())
+    }
+    result=client.publish(topic,str(payload))
+    status = result[0]
+    if status == 0:
+        jsonmsg = json.dumps(payload)
+        logging.info(f"Send `{jsonmsg}` to topic `{topic}`")
     else:
-        logging.info("Training mode")
-        results = model.evaluate(test_x, test_y, return_dict = True)
-        logging.info(results)
-        max_rmse = 0
-        for index in range(test_x.shape[0]):
-            result = model.evaluate(np.array([test_x[index, :, :]]), np.array([test_y[index]]), return_dict = True, verbose=0)
-            max_rmse = max(max_rmse, result['rmse'])
-            
-        logging.info("Max rmse: {}".format(max_rmse))
-
-        train_predictions = model.predict(train_x)
-        train_y = y_norm.denormalize(train_y)
-        train_predictions = y_norm.denormalize(train_predictions)
-        a = 0
-        for b in train_battery_range:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=train_y_soh[a:b], y=train_predictions[a:b,0],
-                               mode='lines', name='predicted'))
-            fig.add_trace(go.Scatter(x=train_y_soh[a:b], y=train_y[a:b],
-                                mode='lines', name='actual'))
-            fig.update_layout(title='Results on training',
-                            xaxis_title='SoH Capacity',
-                            yaxis_title='Remaining Ah until EOL',
-                            xaxis={'autorange':'reversed'},
-                            width=1400,
-                        height=600)
-            # fig.show()
-            fig.write_image(output_images,format='png')
-
+        logging.info(f"Failed to send message to topic {topic}")  
+       
    
-def read_files(model_data: InputPath()):
+def read_files(model_data: InputPath(),mlpipeline_metrics_path: OutputPath('Metrics')):
     '''display stats of data files'''
     import os  
+    import io
+    import json
     res = []
     for (dir_path, dir_names, file_names) in os.walk("/tmp/model"):
         res.extend(dir_path, dir_names, file_names)
@@ -434,26 +536,26 @@ load_trigger_data_op= components.create_component_from_func(
     packages_to_install=['boto3'])
 
 prep_train_data_op= components.create_component_from_func(
-    prep_data, base_image='quay.io/noeloc/batterybase')
+    prep_data_train_model, base_image='quay.io/noeloc/batterybase')
 
-train_model_op= components.create_component_from_func(
-    evaluate_model, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
+upload_model_op= components.create_component_from_func(
+    model_upload_notify, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt','boto3'])
 
 read_files_op= components.create_component_from_func(
     read_files, base_image='quay.io/noeloc/batterybase')
 
 prep_inference_data_op= components.create_component_from_func(
-    prep_data, base_image='quay.io/noeloc/batterybase')
+    prep_data_train_model, base_image='quay.io/noeloc/batterybase')
 
 inference_model_op= components.create_component_from_func(
-    evaluate_model, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
+    model_inference, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
 
 
 @dsl.pipeline(
   name='batterytest-pipeline',
-  description='Download files from minio and store'
+  description='battery pipeline demo'
 )
-def batterytest_pipeline(file_obj:str, src_bucket:str):
+def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
     '''Download files from s3, train, inference'''
     print("Params",file_obj, src_bucket)
     vol = V1Volume(
@@ -466,6 +568,9 @@ def batterytest_pipeline(file_obj:str, src_bucket:str):
     file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"
     
     experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
+
+    # metadata_metrics_op()
+    # test_metrics_op()
     
     trigger_data = load_trigger_data_op(file_obj, src_bucket,file_destination)
     trigger_data.add_pvolumes({"/opt/data/pitstop/": vol})
@@ -474,27 +579,26 @@ def batterytest_pipeline(file_obj:str, src_bucket:str):
     trigger_data.add_env_variable(env_from_secret('s3_secret_access_key', 's3-secret', 'AWS_SECRET_ACCESS_KEY'))
 
     res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=0).after(trigger_data)
-    res.add_pvolumes({"/opt/data/pitstop": vol})    
+    res.add_pvolumes({"/opt/data/pitstop": vol})
 
-    evaluate_result = train_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],model_name=experiment_name,run_mode=0)
-    evaluate_result.add_pvolumes({"/opt/data/pitstop": vol})
-    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
-    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
-    # evaluate_result.add_env_variable(V1EnvVar(name='mqtt_topic', value='batterytest/batterymonitoring'))
-    
-    read_files_op(evaluate_result.output)
-    
-    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=2).after(evaluate_result)
+    inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=experiment_name)
+    inform_result.add_pvolumes({"/opt/data/pitstop": vol})
+    inform_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
+    inform_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
+    inform_result.add_env_variable(V1EnvVar(name='s3_host', value='http://rook-ceph-rgw-ceph-object-store.openshift-storage.svc:8080'))
+    inform_result.add_env_variable(env_from_secret('s3_access_key', 'battery-model-bucket', 'AWS_ACCESS_KEY_ID'))
+    inform_result.add_env_variable(env_from_secret('s3_secret_access_key', 'battery-model-bucket', 'AWS_SECRET_ACCESS_KEY'))
+        
+    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=2).after(inform_result)
     inference_prep.add_pvolumes({"/opt/data/pitstop": vol})
     
-    inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],model_name=experiment_name,run_mode=2)
+    inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],experiment_name=experiment_name,vin=VIN)
     inference_result.add_pvolumes({"/opt/data/pitstop": vol})
     inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
     inference_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
-    inference_result.add_env_variable(V1EnvVar(name='mqtt_topic', value='batterytest/batterymonitoring'))
-    
-    read_files_op(inference_result.output)
 
+    # read_files_op(inference_result.output)
+    
 if __name__ == '__main__':
     os.environ.setdefault("DEFAULT_STORAGE_CLASS","managed-csi")
     os.environ.setdefault("DEFAULT_ACCESSMODES","ReadWriteOnce")
@@ -504,4 +608,4 @@ if __name__ == '__main__':
     pipeline_conf.add_pipeline_annotation("tekton.dev/track_artifact", 'true')
     pipeline_conf.set_ttl_seconds_after_finished(30)
     compiler.produce_taskspec = False
-    compiler.compile(batterytest_pipeline, __file__.replace('.py', '.yaml'),tekton_pipeline_conf=pipeline_conf)  
+    compiler.compile(batterytest_pipeline, __file__.replace('.py', '.yaml'),tekton_pipeline_conf=pipeline_conf)
