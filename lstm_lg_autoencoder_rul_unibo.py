@@ -17,6 +17,7 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     import boto3
     import os
     import logging
+    import zipfile
 
     logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
 
@@ -34,9 +35,15 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
         config=boto3.session.Config(signature_version='s3v4'),
         verify=False
     )
-    with open(file_destination+data_file, 'wb') as f:
+    with open('/tmp/'+data_file, 'wb') as f:
         s3_target.meta.client.download_fileobj(bucket_details, data_file, f)
-
+    
+    
+    with zipfile.ZipFile('/tmp/'+data_file, 'r') as zip_ref:
+        zip_ref.extractall(file_destination)
+    
+    os.listdir(file_destination)
+        
 def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPath(),experiment_name:str,run_mode:int=0):
     """Preps the data for processing"""
     import numpy as np
@@ -282,7 +289,11 @@ def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPat
         hist_df = pd.DataFrame(history.history)
         hist_csv_file = data_path+'data/results/trained_model/%s_history.csv' % experiment_name
         with open(hist_csv_file, mode='w') as f:
-            hist_df.to_csv(f)          
+            hist_df.to_csv(f)   
+            
+
+
+      
 
     data_store = [train_x, train_y, train_battery_range, train_y_soh, y_norm, test_x, test_y]
 
@@ -302,6 +313,7 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     import json
     import random
     import boto3
+    import shutil
     import tensorflow as tf
     from paho.mqtt import client as mqtt_client
     from tensorflow import keras
@@ -317,7 +329,7 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
 
     broker=os.getenv("mqtt_broker","not set")
     port=os.getenv("mqtt_port","-1")
-    topic="batterytest/newmodel"
+    topic="batterytest/modelupdate"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
     
     client_id= f'batterymonitoring-{random.randint(0, 100)}'
@@ -397,11 +409,16 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
         verify=False
     )
     
-    with open(data_path +'data/results/trained_model/%s.h5' % experiment_name, 'rb') as f:
-        s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".h5")
+    shutil.make_archive('/tmp/'+experiment_name, 'zip', data_path+'data/results/trained_model/')
+    
+    # with open(data_path +'data/results/trained_model/%s.h5' % experiment_name, 'rb') as f:
+    #     s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".h5")
         
-    with open(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name, 'rb') as f:
-        s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".csv")
+    # with open(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name, 'rb') as f:
+    #     s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".csv")
+    
+    with open('/tmp/'+experiment_name.zip, 'rb') as f:
+        s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".zip")
         
 
     client = connect_mqtt(client_id)
