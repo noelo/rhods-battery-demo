@@ -5,7 +5,7 @@ import os
 import time
 from kfp import dsl, components
 from kfp.components import InputPath, OutputPath
-from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeSource
+from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeSource, V1SecretVolumeSource
 from kfp_tekton.compiler import TektonCompiler
 from kfp_tekton.compiler import pipeline_utils
 from kfp_tekton.k8s_client_helper import env_from_secret
@@ -18,14 +18,45 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     import os
     import logging
     import zipfile
+    # from paho.mqtt import client as mqtt_client
+    # import time
+    
+    # dir_path = r'/opt/certs/'
+    # res = []
 
-    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
+    # for path in os.listdir(dir_path):
+    #     # check if current path is a file
+    #     if os.path.isfile(os.path.join(dir_path, path)):
+    #         res.append(path)
+    # print(res)
+    
+    # def on_connect(client, userdata, flags, rc):
+    #     print("Connected with result code "+str(rc))
+    #     # Subscribing in on_connect() means that if we lose the connection and
+    #     # reconnect then subscriptions will be renewed.
+    #     payload = "testmsg"
+    #     ret = client.publish('batterytest',payload=payload,qos=1)        
+    #     print("mqtt res ",ret)
+
+    # broker_cert='/opt/certs/public.cert'
+    # logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.DEBUG, datefmt='%Y/%m/%d %H:%M:%S')
+    # client = mqtt_client.Client(client_id="noctest", userdata=None, transport="tcp")
+    # # client.on_connect = on_connect
+    # client.enable_logger(logger=logging)
+    # client.tls_set(ca_certs=broker_cert)
+    # client.tls_insecure_set(True)
+    # client.username_pw_set('admin', 'admin_access.redhat.com')
+    # client.connect(host='mqtt-broker-acc1-0-svc.battery-monitoring.svc', port=1883)
+    # payload = "testmsg"
+    # ret = client.publish('batterytest',payload=payload,qos=1)        
+    # print("mqtt res ",ret)
 
     endpoint_url=os.environ["s3_host"]
     aws_access_key_id=os.environ["s3_access_key"]
     aws_secret_access_key=os.environ["s3_secret_access_key"]
     logging.info("S3 creds %s %s %s ",endpoint_url,aws_access_key_id, aws_secret_access_key)
     logging.info("Trigger data bucket %s file %s ",bucket_details,data_file)
+
 
     s3_target = boto3.resource('s3',
         endpoint_url=endpoint_url,
@@ -289,11 +320,7 @@ def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPat
         hist_df = pd.DataFrame(history.history)
         hist_csv_file = data_path+'data/results/trained_model/%s_history.csv' % experiment_name
         with open(hist_csv_file, mode='w') as f:
-            hist_df.to_csv(f)   
-            
-
-
-      
+            hist_df.to_csv(f)
 
     data_store = [train_x, train_y, train_battery_range, train_y_soh, y_norm, test_x, test_y]
 
@@ -324,30 +351,31 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     from keras.optimizers import Adam
     from keras.layers import LSTM, Masking
 
-    reload(logging)
-    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
+    logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.DEBUG, datefmt='%Y/%m/%d %H:%M:%S')
 
+    broker_cert=os.getenv("mqtt_cert","/opt/certs/public.cert")
     broker=os.getenv("mqtt_broker","not set")
     port=os.getenv("mqtt_port","-1")
     topic="batterytest/modelupdate"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
     
-    client_id= f'batterymonitoring-{random.randint(0, 100)}'
-    username = 'admin'
-    password = 'admin_access.redhat.com'
+    # client_id= f'batterymonitoring-{random.randint(0, 100)}'
+    # username = 'admin'
+    # password = 'admin_access.redhat.com'
     
-    def connect_mqtt(client_id) -> mqtt_client:
-        def on_connect(client, userdata, flags, rc):
-            if rc == 0:
-                logging.info("Connected to MQTT Broker!")
-            else:
-                logging.error("Failed to connect, return code %s", rc)
+    # def connect_mqtt(client_id) -> mqtt_client:
+    #     def on_connect(client, userdata, flags, rc):
+    #         if rc == 0:
+    #             logging.info("Connected to MQTT Broker!")
+    #         else:
+    #             logging.error("Failed to connect, return code %s", rc)
 
-        client = mqtt_client.Client(client_id)
-        client.username_pw_set(username, password)
-        client.on_connect = on_connect
-        client.connect(broker, int(port))
-        return client
+    #     client = mqtt_client.Client(client_id)
+    #     client.enable_logger(logger=logging)
+    #     client.username_pw_set(username, password)
+    #     client.on_connect = on_connect
+    #     client.connect(broker, int(port))
+    #     return client
     
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
@@ -417,11 +445,16 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     # with open(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name, 'rb') as f:
     #     s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".csv")
     
-    with open('/tmp/'+experiment_name.zip, 'rb') as f:
+    with open('/tmp/'+experiment_name+'.zip', 'rb') as f:
         s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".zip")
         
+    client = mqtt_client.Client(client_id="model_upload_notify", userdata=None, transport="tcp")
+    client.enable_logger(logger=logging)
+    client.tls_set(ca_certs=broker_cert)
+    client.tls_insecure_set(True)
+    client.username_pw_set('admin', 'admin_access.redhat.com')
+    client.connect(host='mqtt-broker-acc1-0-svc.battery-monitoring.svc', port=1883)
 
-    client = connect_mqtt(client_id)
     payload={
         "url": "http://rook-ceph-rgw-ceph-object-store-openshift-storage.apps.cluster.a-proof-of-concept.com/",
         "bucket": model_bucket,
@@ -429,14 +462,14 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
         "timestamp": datetime.timestamp(datetime.now()),
         "app_id": "modelbuildpipeline"
     }
-    result=client.publish(topic,str(payload))
-    status = result[0]
+
+    jsonmsg = json.dumps(payload)
+    ret = client.publish(topic,payload=jsonmsg,qos=1) 
+    status = ret[0]
     if status == 0:
-        jsonmsg = json.dumps(payload)
         logging.info(f"Send new model notification `{jsonmsg}` to topic `{topic}`")
     else:
-        logging.info(f"Failed to send new model notification to topic {topic}")  
-                
+        logging.info(f"Failed to send new model notification to topic {topic}")        
                 
 def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str,vin:str="12345"):
     """Evaluate the model"""
@@ -465,25 +498,26 @@ def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str
 
     broker=os.getenv("mqtt_broker","not set")
     port=os.getenv("mqtt_port","-1")
+    broker_cert=os.getenv("mqtt_cert","/opt/certs/public.cert")
     topic="batterytest/batterymonitoring"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
 
-    client_id= f'batterymonitoring-{random.randint(0, 100)}'
-    username = 'admin'
-    password = 'admin_access.redhat.com'
+    # client_id= f'batterymonitoring-{random.randint(0, 100)}'
+    # username = 'admin'
+    # password = 'admin_access.redhat.com'
     
-    def connect_mqtt(client_id) -> mqtt_client:
-        def on_connect(client, userdata, flags, rc):
-            if rc == 0:
-                logging.info("Connected to MQTT Broker!")
-            else:
-                logging.error("Failed to connect, return code %s", rc)
+    # def connect_mqtt(client_id) -> mqtt_client:
+    #     def on_connect(client, userdata, flags, rc):
+    #         if rc == 0:
+    #             logging.info("Connected to MQTT Broker!")
+    #         else:
+    #             logging.error("Failed to connect, return code %s", rc)
 
-        client = mqtt_client.Client(client_id)
-        client.username_pw_set(username, password)
-        client.on_connect = on_connect
-        client.connect(broker, int(port))
-        return client
+    #     client = mqtt_client.Client(client_id)
+    #     client.username_pw_set(username, password)
+    #     client.on_connect = on_connect
+    #     client.connect(broker, int(port))
+    #     return client
     
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
@@ -496,7 +530,6 @@ def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str
 
     logging.info("Inferencing mode")
 
-    client = connect_mqtt(client_id)
     train_predictions = model.predict(train_x)
     train_y = y_norm.denormalize(train_y)
     train_predictions = y_norm.denormalize(train_predictions)
@@ -507,10 +540,19 @@ def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str
         "Battery Lifetime AH": str(y), 
         "Timestamp": str(time.time())
     }
-    result=client.publish(topic,str(payload))
+    
+    
+    jsonmsg = json.dumps(payload)    
+    client = mqtt_client.Client(client_id="model_inference", userdata=None, transport="tcp")
+    client.enable_logger(logger=logging)
+    client.tls_set(ca_certs=broker_cert)
+    client.tls_insecure_set(True)
+    client.username_pw_set('admin', 'admin_access.redhat.com')
+    client.connect(host='mqtt-broker-acc1-0-svc.battery-monitoring.svc', port=1883)    
+    
+    result=client.publish(topic,jsonmsg,qos=1)
     status = result[0]
     if status == 0:
-        jsonmsg = json.dumps(payload)
         logging.info(f"Send `{jsonmsg}` to topic `{topic}`")
     else:
         logging.info(f"Failed to send message to topic {topic}")  
@@ -543,11 +585,14 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
         name='batterydatavol',
         persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
             claim_name='batterydata',)
+        )    
+    mqttcert = V1Volume(
+        name='mqttcert',
+        secret=V1SecretVolumeSource(
+            secret_name='mqtt-cert-secret')
         )
-
     experiment = "lstm_autoencoder_rul_unibo_powertools"
-    file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"
-    
+    file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"    
     experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
   
     trigger_data = load_trigger_data_op(file_obj, src_bucket,file_destination)
@@ -561,19 +606,23 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
 
     inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=experiment_name)
     inform_result.add_pvolumes({"/opt/data/pitstop": vol})
+    inform_result.add_pvolumes({"/opt/certs/": mqttcert})
     inform_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
     inform_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
+    inform_result.add_env_variable(V1EnvVar(name='mqtt_cert', value='/opt/certs/public.cert'))
     inform_result.add_env_variable(V1EnvVar(name='s3_host', value='http://rook-ceph-rgw-ceph-object-store.openshift-storage.svc:8080'))
     inform_result.add_env_variable(env_from_secret('s3_access_key', 'battery-model-bucket', 'AWS_ACCESS_KEY_ID'))
     inform_result.add_env_variable(env_from_secret('s3_secret_access_key', 'battery-model-bucket', 'AWS_SECRET_ACCESS_KEY'))
         
     inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=2).after(inform_result)
     inference_prep.add_pvolumes({"/opt/data/pitstop": vol})
-    
+   
     inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],experiment_name=experiment_name,vin=VIN)
     inference_result.add_pvolumes({"/opt/data/pitstop": vol})
+    inference_result.add_pvolumes({"/opt/certs/": mqttcert})
     inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
     inference_result.add_env_variable(V1EnvVar(name='mqtt_port', value='1883'))
+    inference_result.add_env_variable(V1EnvVar(name='mqtt_cert', value='/opt/certs/public.cert'))
 
 if __name__ == '__main__':
     os.environ.setdefault("DEFAULT_STORAGE_CLASS","managed-csi")
