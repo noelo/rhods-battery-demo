@@ -18,47 +18,16 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
     import os
     import logging
     import zipfile
-    # from paho.mqtt import client as mqtt_client
-    # import time
-    
-    # dir_path = r'/opt/certs/'
-    # res = []
 
-    # for path in os.listdir(dir_path):
-    #     # check if current path is a file
-    #     if os.path.isfile(os.path.join(dir_path, path)):
-    #         res.append(path)
-    # print(res)
-    
-    # def on_connect(client, userdata, flags, rc):
-    #     print("Connected with result code "+str(rc))
-    #     # Subscribing in on_connect() means that if we lose the connection and
-    #     # reconnect then subscriptions will be renewed.
-    #     payload = "testmsg"
-    #     ret = client.publish('batterytest',payload=payload,qos=1)        
-    #     print("mqtt res ",ret)
-
-    # broker_cert='/opt/certs/public.cert'
-    # logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.DEBUG, datefmt='%Y/%m/%d %H:%M:%S')
-    # client = mqtt_client.Client(client_id="noctest", userdata=None, transport="tcp")
-    # # client.on_connect = on_connect
-    # client.enable_logger(logger=logging)
-    # client.tls_set(ca_certs=broker_cert)
-    # client.tls_insecure_set(True)
-    # client.username_pw_set('admin', 'admin_access.redhat.com')
-    # client.connect(host='mqtt-broker-acc1-0-svc.battery-monitoring.svc', port=1883)
-    # payload = "testmsg"
-    # ret = client.publish('batterytest',payload=payload,qos=1)        
-    # print("mqtt res ",ret)
-
-    endpoint_url=os.environ["s3_host"]
-    aws_access_key_id=os.environ["s3_access_key"]
-    aws_secret_access_key=os.environ["s3_secret_access_key"]
-    logging.info("S3 creds %s %s %s ",endpoint_url,aws_access_key_id, aws_secret_access_key)
-    logging.info("Trigger data bucket %s file %s ",bucket_details,data_file)
+    endpoint_url = os.environ["s3_host"]
+    aws_access_key_id = os.environ["s3_access_key"]
+    aws_secret_access_key = os.environ["s3_secret_access_key"]
+    logging.info("S3 creds %s %s %s ", endpoint_url, aws_access_key_id, aws_secret_access_key)
+    logging.info("Trigger data bucket %s file %s ", bucket_details, data_file)
 
 
-    s3_target = boto3.resource('s3',
+    s3_target = boto3.resource(
+        's3',
         endpoint_url=endpoint_url,
         aws_access_key_id=aws_access_key_id,
         aws_secret_access_key=aws_secret_access_key,
@@ -66,16 +35,16 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
         config=boto3.session.Config(signature_version='s3v4'),
         verify=False
     )
+    
     with open('/tmp/'+data_file, 'wb') as f:
         s3_target.meta.client.download_fileobj(bucket_details, data_file, f)
-    
     
     with zipfile.ZipFile('/tmp/'+data_file, 'r') as zip_ref:
         zip_ref.extractall(file_destination)
     
     os.listdir(file_destination)
         
-def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPath(),experiment_name:str,run_mode:int=0):
+def prep_data_train_model(data_path : str, epoch_count : int, parameter_data : OutputPath(), experiment_name : str, run_mode : int=0):
     """Preps the data for processing"""
     import numpy as np
     import pandas as pd
@@ -94,7 +63,6 @@ def prep_data_train_model(data_path:str,epoch_count:int,parameter_data:OutputPat
     from data_processing.unibo_powertools_data import UniboPowertoolsData, CycleCols
     from data_processing.model_data_handler import ModelDataHandler
     from data_processing.prepare_rul_data import RulHandler
-    
     sys.path.append(data_path)
     reload(logging)
     logging.basicConfig(format='%(asctime)s [%(levelname)s]: %(message)s', level=logging.INFO, datefmt='%Y/%m/%d %H:%M:%S')
@@ -359,24 +327,6 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     topic="batterytest/modelupdate"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
     
-    # client_id= f'batterymonitoring-{random.randint(0, 100)}'
-    # username = 'admin'
-    # password = 'admin_access.redhat.com'
-    
-    # def connect_mqtt(client_id) -> mqtt_client:
-    #     def on_connect(client, userdata, flags, rc):
-    #         if rc == 0:
-    #             logging.info("Connected to MQTT Broker!")
-    #         else:
-    #             logging.error("Failed to connect, return code %s", rc)
-
-    #     client = mqtt_client.Client(client_id)
-    #     client.enable_logger(logger=logging)
-    #     client.username_pw_set(username, password)
-    #     client.on_connect = on_connect
-    #     client.connect(broker, int(port))
-    #     return client
-    
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
     train_x=data_store[0]
@@ -439,12 +389,6 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     
     shutil.make_archive('/tmp/'+experiment_name, 'zip', data_path+'data/results/trained_model/')
     
-    # with open(data_path +'data/results/trained_model/%s.h5' % experiment_name, 'rb') as f:
-    #     s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".h5")
-        
-    # with open(data_path + 'data/results/trained_model/%s_history.csv' % experiment_name, 'rb') as f:
-    #     s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".csv")
-    
     with open('/tmp/'+experiment_name+'.zip', 'rb') as f:
         s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".zip")
         
@@ -501,23 +445,6 @@ def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str
     broker_cert=os.getenv("mqtt_cert","/opt/certs/public.cert")
     topic="batterytest/batterymonitoring"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
-
-    # client_id= f'batterymonitoring-{random.randint(0, 100)}'
-    # username = 'admin'
-    # password = 'admin_access.redhat.com'
-    
-    # def connect_mqtt(client_id) -> mqtt_client:
-    #     def on_connect(client, userdata, flags, rc):
-    #         if rc == 0:
-    #             logging.info("Connected to MQTT Broker!")
-    #         else:
-    #             logging.error("Failed to connect, return code %s", rc)
-
-    #     client = mqtt_client.Client(client_id)
-    #     client.username_pw_set(username, password)
-    #     client.on_connect = on_connect
-    #     client.connect(broker, int(port))
-    #     return client
     
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
