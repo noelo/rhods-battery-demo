@@ -1,0 +1,15 @@
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: battery-nonitoring-ingress
+  namespace: redhat-ods-applications
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: battery-monitoring
+  policyTypes:
+    - Ingress

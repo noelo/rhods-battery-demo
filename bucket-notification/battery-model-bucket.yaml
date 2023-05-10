@@ -1,0 +1,9 @@
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: battery-model-bucket
+  labels:
+    app-owner: battery-monitor
+spec:
+  bucketName: battery-model-bucket
+  storageClassName: object

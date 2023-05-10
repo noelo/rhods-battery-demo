@@ -1,0 +1,55 @@
+# A default broker
+apiVersion: eventing.knative.dev/v1
+kind: Broker
+metadata:
+  name: default
+  annotations:
+    eventing.knative.dev/broker.class: MTChannelBasedBroker
+spec: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bucket-notification-handler
+spec:
+  replicas: 1
+  selector:
+    matchLabels: 
+      app: bucket-notification-handler
+  template:
+    metadata:
+      labels:
+        app: bucket-notification-handler 
+    spec:
+      containers:
+        - name: bucket-notification-handler
+          image: quay.io/noeloc/bucket-notification-handler
+          imagePullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bucket-notification-handler-svc
+spec:
+  selector:
+    app: bucket-notification-handler
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: bucket-notification-handler
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: test.noc.fschanged
+      source: minio.src/dev
+  subscriber:
+    ref:
+      apiVersion: v1
+      kind: Service
+      name: bucket-notification-handler-svc

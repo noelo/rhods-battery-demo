@@ -308,7 +308,7 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     import json
     import random
     import boto3
-    import shutil
+    import zipfile 
     import tensorflow as tf
     from paho.mqtt import client as mqtt_client
     from tensorflow import keras
@@ -326,7 +326,7 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     port=os.getenv("mqtt_port","-1")
     topic="batterytest/modelupdate"
     logging.info("MQTT params Broker=%s Port=%s Topic=%s",broker,port,topic)
-    
+
     f = open(paramater_data,"b+r")
     data_store = pickle.load(f)
     train_x=data_store[0]
@@ -336,10 +336,10 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     y_norm=data_store[4]
     test_x=data_store[5]
     test_y=data_store[6]
-    
+
     model = keras.models.load_model(data_path +'data/results/trained_model/%s.h5' % experiment_name)
     model.summary(expand_nested=True)
-    
+
     logging.info("Training mode")
     results = model.evaluate(test_x, test_y, return_dict = True)
     logging.info(results)
@@ -377,7 +377,7 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     aws_secret_access_key=os.environ["s3_secret_access_key"]
     logging.info("S3 creds %s %s %s ",endpoint_url,aws_access_key_id, aws_secret_access_key)
     logging.info("Uploading model to %s file %s ",model_bucket,experiment_name)
-
+#
     s3_target = boto3.resource('s3',
         endpoint_url=endpoint_url,
         aws_access_key_id=aws_access_key_id,
@@ -386,8 +386,9 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
         config=boto3.session.Config(signature_version='s3v4'),
         verify=False
     )
-    
-    shutil.make_archive('/tmp/'+experiment_name, 'zip', data_path+'data/results/trained_model/')
+
+    with zipfile.ZipFile('/tmp/'+experiment_name+'.zip', mode="w") as myzip:
+        myzip.write(data_path +'data/results/trained_model/%s.h5' % experiment_name)
     
     with open('/tmp/'+experiment_name+'.zip', 'rb') as f:
         s3_target.meta.client.upload_fileobj(f,model_bucket, experiment_name+".zip")
