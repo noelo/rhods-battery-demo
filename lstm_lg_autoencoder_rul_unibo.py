@@ -12,19 +12,22 @@ from kfp_tekton.k8s_client_helper import env_from_secret
 from typing import NamedTuple
 
 #help="0 normal Training (default), 1 Bad Training, 2 Inference", default=0)
-def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
+def load_trigger_data(data_file:str,bucket_details:str,file_destination:str)->str:
     '''load data file passed from cloud event into relevant location'''
     import boto3
     import os
     import logging
     import zipfile
+    import time
+    
+    experiment = "lstm_autoencoder_rul_unibo_powertools"
+    experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
 
     endpoint_url = os.environ["s3_host"]
     aws_access_key_id = os.environ["s3_access_key"]
     aws_secret_access_key = os.environ["s3_secret_access_key"]
     logging.info("S3 creds %s %s %s ", endpoint_url, aws_access_key_id, aws_secret_access_key)
     logging.info("Trigger data bucket %s file %s ", bucket_details, data_file)
-
 
     s3_target = boto3.resource(
         's3',
@@ -43,6 +46,7 @@ def load_trigger_data(data_file:str,bucket_details:str,file_destination:str):
         zip_ref.extractall(file_destination)
     
     os.listdir(file_destination)
+    return experiment_name
         
 def prep_data_train_model(data_path : str, epoch_count : int, parameter_data : OutputPath(), experiment_name : str, run_mode : int=0):
     """Preps the data for processing"""
@@ -519,20 +523,19 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
         secret=V1SecretVolumeSource(
             secret_name='mqtt-cert-secret')
         )
-    experiment = "lstm_autoencoder_rul_unibo_powertools"
-    file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"    
-    experiment_name = time.strftime("%Y-%m-%d-%H-%M-%S") + '_' + experiment
+
+    file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"
   
     trigger_data = load_trigger_data_op(file_obj, src_bucket,file_destination)
     trigger_data.add_pvolumes({"/opt/data/pitstop/": vol})
     trigger_data.add_env_variable(V1EnvVar(name='s3_host', value='http://rook-ceph-rgw-ceph-object-store.openshift-storage.svc:8080'))
     trigger_data.add_env_variable(env_from_secret('s3_access_key', 's3-secret', 'AWS_ACCESS_KEY_ID'))
     trigger_data.add_env_variable(env_from_secret('s3_secret_access_key', 's3-secret', 'AWS_SECRET_ACCESS_KEY'))
-
-    res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=0).after(trigger_data)
+    
+    res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=trigger_data.output,run_mode=0).after(trigger_data)
     res.add_pvolumes({"/opt/data/pitstop": vol})
 
-    inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=experiment_name)
+    inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=trigger_data.output)
     inform_result.add_pvolumes({"/opt/data/pitstop": vol})
     inform_result.add_pvolumes({"/opt/certs/": mqttcert})
     inform_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
@@ -542,10 +545,10 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
     inform_result.add_env_variable(env_from_secret('s3_access_key', 'battery-model-bucket', 'AWS_ACCESS_KEY_ID'))
     inform_result.add_env_variable(env_from_secret('s3_secret_access_key', 'battery-model-bucket', 'AWS_SECRET_ACCESS_KEY'))
         
-    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=experiment_name,run_mode=2).after(inform_result)
+    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=trigger_data.output,run_mode=2).after(inform_result)
     inference_prep.add_pvolumes({"/opt/data/pitstop": vol})
    
-    inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],experiment_name=experiment_name,vin=VIN)
+    inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],experiment_name=trigger_data.output,vin=VIN)
     inference_result.add_pvolumes({"/opt/data/pitstop": vol})
     inference_result.add_pvolumes({"/opt/certs/": mqttcert})
     inference_result.add_env_variable(V1EnvVar(name='mqtt_broker', value='mqtt-broker-acc1-0-svc.battery-monitoring.svc'))
