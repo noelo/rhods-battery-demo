@@ -413,12 +413,12 @@ def model_upload_notify(data_path:str,paramater_data:InputPath(),experiment_name
     }
 
     jsonmsg = json.dumps(payload)
-    ret = client.publish(topic,payload=jsonmsg,qos=1) 
+    ret = client.publish(topic,payload=jsonmsg,qos=1)
     status = ret[0]
     if status == 0:
         logging.info(f"Send new model notification `{jsonmsg}` to topic `{topic}`")
     else:
-        logging.info(f"Failed to send new model notification to topic {topic}")        
+        logging.info(f"Failed to send new model notification to topic {topic}")
                 
 def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str,vin:str="12345"):
     """Evaluate the model"""
@@ -510,9 +510,9 @@ inference_model_op= components.create_component_from_func(
   name='batterytest-pipeline',
   description='battery pipeline demo'
 )
-def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
+def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356",epoch_count:int=270):
     '''Download files from s3, train, inference'''
-    print("Params",file_obj, src_bucket)
+    print("Params",file_obj, src_bucket,VIN,epoch_count)
     vol = V1Volume(
         name='batterydatavol',
         persistent_volume_claim=V1PersistentVolumeClaimVolumeSource(
@@ -532,7 +532,7 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
     trigger_data.add_env_variable(env_from_secret('s3_access_key', 's3-secret', 'AWS_ACCESS_KEY_ID'))
     trigger_data.add_env_variable(env_from_secret('s3_secret_access_key', 's3-secret', 'AWS_SECRET_ACCESS_KEY'))
     
-    res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=trigger_data.output,run_mode=0).after(trigger_data)
+    res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=epoch_count,experiment_name=trigger_data.output,run_mode=0).after(trigger_data)
     res.add_pvolumes({"/opt/data/pitstop": vol})
 
     inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=trigger_data.output)
@@ -545,7 +545,7 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356"):
     inform_result.add_env_variable(env_from_secret('s3_access_key', 'battery-model-bucket', 'AWS_ACCESS_KEY_ID'))
     inform_result.add_env_variable(env_from_secret('s3_secret_access_key', 'battery-model-bucket', 'AWS_SECRET_ACCESS_KEY'))
         
-    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=2,experiment_name=trigger_data.output,run_mode=2).after(inform_result)
+    inference_prep = prep_inference_data_op(data_path="/opt/data/pitstop/",epoch_count=epoch_count,experiment_name=trigger_data.output,run_mode=2).after(inform_result)
     inference_prep.add_pvolumes({"/opt/data/pitstop": vol})
    
     inference_result = inference_model_op(data_path="/opt/data/pitstop/",paramater_data=inference_prep.outputs["parameter_data"],experiment_name=trigger_data.output,vin=VIN)
