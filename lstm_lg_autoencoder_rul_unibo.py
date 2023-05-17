@@ -5,7 +5,7 @@ import os
 import time
 from kfp import dsl, components
 from kfp.components import InputPath, OutputPath
-from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeSource, V1SecretVolumeSource
+from kubernetes.client import V1Volume, V1EnvVar, V1PersistentVolumeClaimVolumeSource, V1SecretVolumeSource, V1Toleration
 from kfp_tekton.compiler import TektonCompiler
 from kfp_tekton.compiler import pipeline_utils
 from kfp_tekton.k8s_client_helper import env_from_secret
@@ -523,6 +523,11 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356",epoch_count:i
         secret=V1SecretVolumeSource(
             secret_name='mqtt-cert-secret')
         )
+    
+    gpu_toleration = V1Toleration(effect='NoSchedule',
+                                  key='nvidia.com/gpu',
+                                  operator='Equal',
+                                  value='true')
 
     file_destination = "/opt/data/pitstop/data/unibo-powertools-dataset/unibo-powertools-dataset/"
   
@@ -534,6 +539,8 @@ def batterytest_pipeline(file_obj:str, src_bucket:str,VIN="412356",epoch_count:i
     
     res = prep_train_data_op(data_path="/opt/data/pitstop/",epoch_count=epoch_count,experiment_name=trigger_data.output,run_mode=0).after(trigger_data)
     res.add_pvolumes({"/opt/data/pitstop": vol})
+    res.add_node_selector_constraint(label_name='nvidia.com/gpu.present',value='true')
+    res.add_toleration(gpu_toleration)
 
     inform_result = upload_model_op(data_path="/opt/data/pitstop/",paramater_data=res.outputs["parameter_data"],experiment_name=trigger_data.output)
     inform_result.add_pvolumes({"/opt/data/pitstop": vol})
