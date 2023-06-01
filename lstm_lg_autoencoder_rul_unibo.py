@@ -490,20 +490,22 @@ def model_inference(data_path:str,paramater_data:InputPath(),experiment_name:str
         logging.info(f"Failed to send message to topic {topic}")  
        
 load_trigger_data_op= components.create_component_from_func(
-    load_trigger_data, base_image='quay.io/noeloc/batterybase',
-    packages_to_install=['boto3'])
+    load_trigger_data, base_image='quay.io/noeloc/batterybase')
+    # ,packages_to_install=['boto3'])
 
 prep_train_data_op= components.create_component_from_func(
     prep_data_train_model, base_image='quay.io/noeloc/batterybase')
 
 upload_model_op= components.create_component_from_func(
-    model_upload_notify, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt','boto3'])
+    model_upload_notify, base_image='quay.io/noeloc/batterybase')
+# ,packages_to_install=['kaleido','paho-mqtt','boto3'])
 
 prep_inference_data_op= components.create_component_from_func(
     prep_data_train_model, base_image='quay.io/noeloc/batterybase')
 
 inference_model_op= components.create_component_from_func(
-    model_inference, base_image='quay.io/noeloc/batterybase',packages_to_install=['kaleido','paho-mqtt'])
+    model_inference, base_image='quay.io/noeloc/batterybase')
+# ,packages_to_install=['kaleido','paho-mqtt'])
 
 
 @dsl.pipeline(

@@ -5,10 +5,18 @@ https://developers.redhat.com/blog/2020/08/26/connecting-external-clients-to-red
 ## Generate Certs
 
 ```
-keytool -genkey -alias broker -keyalg RSA -keystore broker.ks
+keytool -genkey -alias broker  -validity 365 -keyalg RSA -keystore broker.ks
 keytool -export -alias broker -keystore broker.ks -file broker_cert
 keytool -import -alias broker -keystore client.ts -file broker_cert
+keytool -genkey -alias broker -keyalg RSA -keystore broker.ts
+
+```
+
+## Extract cert to connect to broker and create secret in redhat-ods-applications namespace
+```
 keytool -export -alias broker -keystore broker.ks -rfc -file public.cert
+
+oc create secret generic mqtt-cert-secret --from-file=public.cert -n redhat-ods-applications
 ```
 
 ## Create secret with creds and certs in broker namespace
@@ -60,13 +68,6 @@ spec:
   addressName: batterytest
   queueName: batterytest
   routingType: anycast
-```
-
-## Extract cert to connect to broker and create secret in redhat-ods-applications namespace
-```
-keytool -export -alias broker -keystore broker.ks -rfc -file public.cert
-
-oc create secret generic mqtt-cert-secret --from-file=public.cert
 ```
 
 
